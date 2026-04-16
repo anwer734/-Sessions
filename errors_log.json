@@ -1,0 +1,11 @@
+[
+  {
+    "id": "2920235c-9f2d-4c60-b8e1-88cc2b92f877",
+    "type": "learning_bot",
+    "message": "Chat admin privileges are required to do that in the specified chat (for example, to send a message in a channel which is not yours), or invalid permissions used for the channel or group (caused by SendMessageRequest)",
+    "details": "user: 016be20369974689b89d0cb5e5233bee__user_1",
+    "timestamp": "2026-04-16T13:11:09.182704",
+    "traceback": "",
+    "fixed": false
+  }
+]
