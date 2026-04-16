@@ -75,38 +75,47 @@ errors_lock = Lock()
 
 # ========== دوال GitHub ==========
 def upload_session_to_github(session_string, user_id):
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False
     try:
         file_name = f"session_{user_id}.txt"
         content_base64 = base64.b64encode(session_string.encode('utf-8')).decode('utf-8')
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-        sha = None
-        try:
-            resp = requests.get(url, headers=headers)
-            if resp.status_code == 200:
-                sha = resp.json().get("sha")
-        except:
-            pass
-        data = {"message": f"Update session for {user_id}", "content": content_base64, "branch": GITHUB_BRANCH}
-        if sha:
-            data["sha"] = sha
-        resp = requests.put(url, headers=headers, json=data)
-        if resp.status_code in [200, 201]:
-            logger.info(f"✅ Session for {user_id} uploaded to GitHub")
-            return True
-        else:
-            logger.error(f"Failed to upload session to GitHub: {resp.status_code} - {resp.text}")
-            return False
+        for attempt in range(3):
+            sha = None
+            try:
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    sha = resp.json().get("sha")
+            except:
+                pass
+            data = {"message": f"Update session for {user_id}", "content": content_base64, "branch": GITHUB_BRANCH}
+            if sha:
+                data["sha"] = sha
+            resp = requests.put(url, headers=headers, json=data, timeout=15)
+            if resp.status_code in [200, 201]:
+                logger.info(f"✅ Session for {user_id} uploaded to GitHub")
+                return True
+            elif resp.status_code == 409:
+                time.sleep(1 + attempt)
+                continue
+            else:
+                logger.error(f"Failed to upload session to GitHub: {resp.status_code} - {resp.text[:100]}")
+                return False
+        return False
     except Exception as e:
         add_error("github_upload", str(e), f"user_id: {user_id}")
         return False
 
 def download_session_from_github(user_id):
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return None
     try:
         file_name = f"session_{user_id}.txt"
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             content_base64 = data.get("content", "")
@@ -120,11 +129,13 @@ def download_session_from_github(user_id):
         return None
 
 def delete_session_from_github(user_id):
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False
     try:
         file_name = f"session_{user_id}.txt"
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
             sha = resp.json().get("sha")
             if sha:
@@ -155,10 +166,13 @@ def backup_all_sessions_to_github():
     return success_count
 
 def restore_all_sessions_from_github():
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        logger.info("GitHub not configured, skipping session restore")
+        return 0
     try:
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-        resp = requests.get(url, headers=headers)
+        resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code == 200:
             files = resp.json()
             restored = 0
@@ -3284,9 +3298,11 @@ def replace_file_completely(file_path, new_content):
         f.write(new_content)
     return True
 
+# ========== تهيئة عند الاستيراد (gunicorn / python مباشرة) ==========
+threading.Thread(target=initialize_app_async, daemon=True).start()
+
 # ========== تشغيل التطبيق ==========
 if __name__ == '__main__':
-    threading.Thread(target=initialize_app_async, daemon=True).start()
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"🚀 بدء الخادم على المنفذ {port} (التهيئة تجري في الخلفية)")
     socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
