@@ -1153,7 +1153,7 @@ async function parseJoinLinks(){
     parsedJoinLinks=data.links;
     const listEl=document.getElementById('joinParsedList');
     listEl.innerHTML=`<div style="font-size:13px;color:var(--text-muted);margin-bottom:10px">تم فرز ${data.count} رابط، سيتم الانضمام إليها جميعاً:</div>`+
-        parsedJoinLinks.map(l=>`<div style="padding:6px 10px;background:var(--bg-card2);border-radius:8px;margin:4px 0;font-size:12px;border:1px solid var(--border)" id="joinRow_${btoa(l.url||l.label||'').slice(0,10)}">${escapeHtml(l.label||l.url||'')}</div>`).join('');
+        parsedJoinLinks.map((l,idx)=>`<div style="padding:6px 10px;background:var(--bg-card2);border-radius:8px;margin:4px 0;font-size:12px;border:1px solid var(--border)" id="joinRow_${idx}">${escapeHtml(l.label||l.entity||'')}</div>`).join('');
     document.getElementById('joinParsedSection').style.display='block';
     showToast(`✅ تم فرز ${data.count} رابط`,'success');
     document.getElementById('joinResultsSection')?.remove();
