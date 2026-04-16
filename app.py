@@ -841,6 +841,10 @@ class TelegramClientManager:
                 self._save_string_session(session_string)
             await self._register_event_handlers()
             if await self.client.is_user_authorized():
+                _should_start_scheduled = False
+                _sched_args = {}
+                _should_start_rotating = False
+                _rot_args = {}
                 with USERS_LOCK:
                     ud = USERS.get(self.user_id)
                     if ud:
@@ -856,19 +860,29 @@ class TelegramClientManager:
                             ud.scheduled_message = ud.settings.get('scheduled_message', '')
                             ud.scheduled_image = ud.settings.get('scheduled_image')
                             if ud.scheduled_active and ud.scheduled_interval > 0 and ud.scheduled_groups:
-                                self.start_scheduled(
-                                    ud.scheduled_groups,
-                                    ud.scheduled_message,
-                                    ud.scheduled_image,
-                                    ud.scheduled_interval
-                                )
+                                _should_start_scheduled = True
+                                _sched_args = {
+                                    'groups': ud.scheduled_groups,
+                                    'message': ud.scheduled_message,
+                                    'image_path': ud.scheduled_image,
+                                    'interval_minutes': ud.scheduled_interval
+                                }
                         if ud.settings.get('rotating_active'):
                             ud.rotating_active = True
                             ud.rotating_messages = ud.settings.get('rotating_messages', ["", "", "", "", ""])
                             ud.rotating_groups = ud.settings.get('rotating_groups', [])
                             ud.rotating_interval = ud.settings.get('rotating_interval', 5)
                             if ud.rotating_active and ud.rotating_groups and any(msg.strip() for msg in ud.rotating_messages):
-                                self.start_rotating(ud.rotating_groups, ud.rotating_messages, ud.rotating_interval)
+                                _should_start_rotating = True
+                                _rot_args = {
+                                    'groups': ud.rotating_groups,
+                                    'messages': ud.rotating_messages,
+                                    'interval_minutes': ud.rotating_interval
+                                }
+                if _should_start_scheduled:
+                    self.start_scheduled(**_sched_args)
+                if _should_start_rotating:
+                    self.start_rotating(**_rot_args)
                 try:
                     me = await self.client.get_me()
                     if me:
@@ -3118,6 +3132,7 @@ def index():
 @app.route("/ping")
 def ping():
     return "pong", 200
+
 
 @app.after_request
 def add_no_cache(response):
