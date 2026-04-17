@@ -69,8 +69,8 @@ GITHUB_REPO = "anwer734/-Sessions"
 GITHUB_BRANCH = "main"
 
 # ========== متغيرات التحكم ==========
-app_ready = False
-app_initializing = True
+app_ready = True
+app_initializing = False
 init_lock = threading.Lock()
 errors_list = []
 errors_lock = Lock()
@@ -3146,9 +3146,6 @@ self.addEventListener('activate', event => {
 # ========== الصفحة الرئيسية ==========
 @app.route("/")
 def index():
-    global app_ready
-    if not app_ready:
-        return render_template_string(LOADING_PAGE)
     uid = get_current_user_id()
     slot = get_current_slot()
     ud = get_or_create_user(uid)
