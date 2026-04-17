@@ -1,13 +1,1 @@
-__pycache__/
-*.py[cod]
-*.pyc
-.env
-sessions/*.json
-private_storage/
-static/uploads/
-*.session
-*.session-journal
-errors_log.json
-User-Interface/
-User-Interface.zip
-.local/
+User-Interface/.repl.it
