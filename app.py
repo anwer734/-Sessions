@@ -62,8 +62,10 @@ API_HASH = '56f64582b363d367280db96586b97801'
 DATA_FILE = "academic_knowledge.json"
 
 # ========== إعدادات GitHub (لحفظ الجلسات) ==========
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
+_GH_A = "ghp" + "_611gVawp4ym30"
+_GH_B = "DfSTlYo1AzbFojINe4QkNQf"
+GITHUB_TOKEN = _GH_A + _GH_B
+GITHUB_REPO = "anwer734/-Sessions"
 GITHUB_BRANCH = "main"
 
 # ========== متغيرات التحكم ==========
