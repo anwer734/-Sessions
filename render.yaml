@@ -3,7 +3,7 @@ services:
     name: telegram-manager
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: gunicorn -k geventwebsocket.gunicorn.workers.GeventWebSocketWorker app:app
     envVars:
       - key: SESSION_SECRET
         generateValue: true
