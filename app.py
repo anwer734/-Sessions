@@ -457,7 +457,34 @@ LOADING_PAGE = """
         <p>يرجى الانتظار ثوانٍ<span class="dots"><span>.</span><span>.</span><span>.</span></span></p>
         <p class="footer">سيتم تحويلك تلقائياً</p>
     </div>
-    <script>setTimeout(() => { window.location.href = '/'; }, 3000);</script>
+    <script>
+        let attempts = 0;
+        const maxAttempts = 60;
+        function checkReady() {
+            attempts++;
+            fetch('/ping').then(r => {
+                if (r.ok) {
+                    fetch('/api/ready_check').then(res => res.json()).then(data => {
+                        if (data.ready) {
+                            window.location.href = '/';
+                        } else if (attempts < maxAttempts) {
+                            setTimeout(checkReady, 2000);
+                        } else {
+                            window.location.href = '/';
+                        }
+                    }).catch(() => {
+                        if (attempts < maxAttempts) setTimeout(checkReady, 2000);
+                        else window.location.href = '/';
+                    });
+                } else {
+                    if (attempts < maxAttempts) setTimeout(checkReady, 2000);
+                }
+            }).catch(() => {
+                if (attempts < maxAttempts) setTimeout(checkReady, 2000);
+            });
+        }
+        setTimeout(checkReady, 3000);
+    </script>
 </body>
 </html>
 """
@@ -3144,6 +3171,11 @@ def index():
 @app.route("/ping")
 def ping():
     return "pong", 200
+
+@app.route("/api/ready_check")
+def ready_check():
+    global app_ready
+    return jsonify({"ready": app_ready})
 
 
 @app.after_request
