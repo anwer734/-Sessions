@@ -4,4 +4,5 @@ requests>=2.33.1
 telethon>=1.43.1
 werkzeug>=3.1.8
 gunicorn>=21.2.0
-eventlet>=0.35.0
+gevent>=23.9.0
+gevent-websocket>=0.10.1
