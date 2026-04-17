@@ -1144,6 +1144,23 @@ class TelegramClientManager:
                                 socketio.emit('stats_update', dict(ud2.stats), to=self.user_id)
                         socketio.emit('new_alert', alert, to=self.user_id)
                         socketio.emit('log_update', {"message": f"🚨 تنبيه: '{kw}' في [{chat_title}] من [{sender_name}]"}, to=self.user_id)
+                        # إرسال تنبيه فوري إلى حساب Telegram الخاص
+                        try:
+                            group_link = f"https://t.me/{chat_username}" if chat_username else f"(ID: {chat_id})"
+                            tg_alert = (
+                                f"🚨 **تنبيه مراقبة** 🚨\n\n"
+                                f"🔑 **الكلمة:** `{kw}`\n"
+                                f"👥 **المجموعة:** {chat_title}\n"
+                                f"🔗 **الرابط:** {group_link}\n"
+                                f"👤 **المرسل:** {sender_name}\n"
+                                f"🕐 **الوقت:** {datetime.now().strftime('%H:%M:%S')}\n\n"
+                                f"💬 **الرسالة:**\n{msg_text[:300]}"
+                            )
+                            await self.client.send_message('me', tg_alert, parse_mode='md')
+                            socketio.emit('log_update', {"message": f"📩 تم إرسال التنبيه إلى حسابك على Telegram"}, to=self.user_id)
+                        except Exception as tg_err:
+                            logger.warning(f"فشل إرسال تنبيه Telegram: {tg_err}")
+                            add_error("monitoring_notify", str(tg_err), f"user: {self.user_id}")
 
             fresh_rules = load_settings(self.user_id)
             live_auto_replies = fresh_rules.get('auto_replies', [])
