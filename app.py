@@ -427,24 +427,34 @@ LOADING_PAGE = """
             max-width: 90%;
             width: 400px;
         }
-        .loader {
-            width: 50px;
-            height: 50px;
-            border: 5px solid rgba(255,255,255,0.3);
-            border-top: 5px solid white;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin: 1.5rem auto;
+        .app-icon {
+            width: 110px;
+            height: 110px;
+            border-radius: 24px;
+            margin: 0 auto 1.5rem auto;
+            display: block;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+            animation: pulse 2s ease-in-out infinite;
         }
-        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
-        .footer { margin-top: 2rem; font-size: 0.8rem; opacity: 0.7; }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
+            50% { transform: scale(1.05); box-shadow: 0 12px 40px rgba(0,0,0,0.4); }
+        }
+        h1 { font-size: 1.3rem; margin-bottom: 0.8rem; }
+        p { font-size: 0.9rem; opacity: 0.85; }
+        .footer { margin-top: 1.5rem; font-size: 0.78rem; opacity: 0.6; }
+        .dots { display: inline-block; }
+        .dots span { animation: blink 1.4s infinite; opacity: 0; }
+        .dots span:nth-child(2) { animation-delay: 0.2s; }
+        .dots span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink { 0%,80%,100%{opacity:0} 40%{opacity:1} }
     </style>
 </head>
 <body>
     <div class="container">
+        <img src="/static/icons/icon-192.png" class="app-icon" alt="أيقونة التطبيق">
         <h1>جاري تحميل وظائف التطبيق</h1>
-        <div class="loader"></div>
-        <p>يرجى الانتظار ثوانٍ...</p>
+        <p>يرجى الانتظار ثوانٍ<span class="dots"><span>.</span><span>.</span><span>.</span></span></p>
         <p class="footer">سيتم تحويلك تلقائياً</p>
     </div>
     <script>setTimeout(() => { window.location.href = '/'; }, 3000);</script>
