@@ -1189,8 +1189,12 @@ class TelegramClientManager:
             add_error("message_handler", str(e), f"user: {self.user_id}")
 
     def run_coroutine(self, coro, timeout=30):
+        # إذا كان الـ loop مغلقاً أو غير موجود، حاول إعادة تشغيل الـ thread
         if not self.loop or self.loop.is_closed():
-            raise Exception("Event loop not initialized or closed")
+            logger.warning(f"Loop closed/None for {self.user_id}, attempting restart...")
+            restarted = self.start_client_thread()
+            if not restarted or not self.loop or self.loop.is_closed():
+                raise Exception("Event loop not initialized or closed")
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         return future.result(timeout=timeout)
 
@@ -1740,6 +1744,15 @@ def ensure_client_running(uid):
     if ud.client_manager is None:
         ud.client_manager = TelegramClientManager(uid)
         logger.info(f"Created new client manager for {uid}")
+    else:
+        # إعادة إنشاء الـ manager إذا كان الـ loop مغلقاً أو الـ thread ميتاً
+        loop_dead = (ud.client_manager.loop is None or ud.client_manager.loop.is_closed())
+        thread_dead = (ud.client_manager.thread is None or not ud.client_manager.thread.is_alive())
+        if loop_dead or thread_dead:
+            logger.warning(f"Recreating client manager for {uid} (loop_dead={loop_dead}, thread_dead={thread_dead})")
+            old_settings = load_settings(uid)
+            ud.client_manager = TelegramClientManager(uid)
+            logger.info(f"Recreated client manager for {uid}")
 
     for attempt in range(3):
         if ud.client_manager.start_client_thread():
