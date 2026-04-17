@@ -2,10 +2,13 @@ services:
   - type: web
     name: telegram-manager
     env: python
+    pythonVersion: "3.11"
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn --worker-class gthread --workers 1 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 --preload app:app
+    startCommand: gunicorn --worker-class gthread --workers 1 --threads 4 --bind 0.0.0.0:$PORT --timeout 120 app:app
     envVars:
       - key: SESSION_SECRET
         generateValue: true
       - key: GITHUB_TOKEN
         sync: false
+      - key: PYTHON_VERSION
+        value: "3.11.0"
