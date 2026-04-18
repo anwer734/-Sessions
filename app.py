@@ -2107,9 +2107,56 @@ def api_verify_code():
         threading.Thread(target=upload_session_to_github, args=(session_string, uid), daemon=True).start()
         return jsonify({"success": True, "message": "تم تسجيل الدخول", "name": tg_name})
     except errors.SessionPasswordNeededError:
-        with USERS_LOCK:
-            ud.awaiting_password = True
-        return jsonify({"success": False, "need_password": True, "message": "مطلوب كلمة مرور التحقق بخطوتين"})
+        # تحقق من وجود رمز ثنائي محفوظ لهذا الرقم
+        s2 = load_settings(uid)
+        phone_now = s2.get("phone", "")
+        saved_pws = s2.get("saved_passwords", {})
+        saved_pw = saved_pws.get(phone_now, "")
+        if saved_pw:
+            # حاول تسجيل الدخول تلقائياً بالرمز المحفوظ
+            try:
+                me = ud.client_manager.run_coroutine(
+                    ud.client_manager.client.sign_in(password=saved_pw), timeout=30)
+                tg_name = ((getattr(me, "first_name", "") or "") + " " + (getattr(me, "last_name", "") or "")).strip()
+                with USERS_LOCK:
+                    ud.authenticated = True
+                    ud.awaiting_password = False
+                    ud.telegram_name = tg_name
+                s2["telegram_name"] = tg_name
+                s2["awaiting_code"] = False
+                session_string = ud.client_manager.client.session.save()
+                ud.string_session = session_string
+                s2["string_session"] = session_string
+                save_settings(uid, s2)
+                ud.settings = s2
+                if s2.get("monitoring_active"):
+                    ud.monitoring_active = True
+                    bot = get_learning_bot(uid)
+                    bot.is_monitoring = True
+                    if ud.client_manager and ud.client_manager.loop:
+                        try:
+                            asyncio.run_coroutine_threadsafe(bot.start_with_client(ud.client_manager.client), ud.client_manager.loop)
+                        except Exception: pass
+                if s2.get("rotating_active"):
+                    ud.rotating_active = True
+                    ud.rotating_messages = s2.get("rotating_messages", ["","","","",""])
+                    ud.rotating_groups = s2.get("rotating_groups", [])
+                    ud.rotating_interval = s2.get("rotating_interval", 5)
+                    if ud.rotating_groups and any(m.strip() for m in ud.rotating_messages):
+                        ud.client_manager.start_rotating(ud.rotating_groups, ud.rotating_messages, ud.rotating_interval)
+                socketio.emit("telegram_name_update", {"name": tg_name, "user_id": uid}, to=uid)
+                threading.Thread(target=upload_session_to_github, args=(session_string, uid), daemon=True).start()
+                return jsonify({"success": True, "message": f"✅ تم تسجيل الدخول تلقائياً باستخدام الرمز المحفوظ", "name": tg_name, "auto_2fa": True})
+            except Exception:
+                # الرمز المحفوظ خاطئ أو تم تغييره
+                with USERS_LOCK:
+                    ud.awaiting_password = True
+                return jsonify({"success": False, "need_password": True, "saved_failed": True,
+                                "message": "⚠️ الرمز الثنائي المحفوظ خاطئ أو تم تغييره، أدخل الرمز الجديد"})
+        else:
+            with USERS_LOCK:
+                ud.awaiting_password = True
+            return jsonify({"success": False, "need_password": True, "message": "مطلوب كلمة مرور التحقق بخطوتين"})
     except Exception as e:
         err = str(e)
         add_error("verify_code", err, f"phone: {phone}")
@@ -2125,13 +2172,20 @@ def api_verify_password():
         return jsonify({"success": False, "message": "العميل غير جاهز"})
     try:
         me = ud.client_manager.run_coroutine(ud.client_manager.client.sign_in(password=password), timeout=30)
-        tg_name = (getattr(me, "first_name", "") or "").strip()
+        tg_name = ((getattr(me, "first_name", "") or "") + " " + (getattr(me, "last_name", "") or "")).strip()
         with USERS_LOCK:
             ud.authenticated = True
             ud.awaiting_password = False
             ud.telegram_name = tg_name
         s = load_settings(uid)
         s["telegram_name"] = tg_name
+        # حفظ الرمز الثنائي مرتبطاً برقم الهاتف
+        phone_key = s.get("phone", "")
+        if phone_key and password:
+            saved_pws = s.get("saved_passwords", {})
+            saved_pws[phone_key] = password
+            s["saved_passwords"] = saved_pws
+            logger.info(f"✅ تم حفظ الرمز الثنائي للرقم {phone_key}")
         session_string = ud.client_manager.client.session.save()
         ud.string_session = session_string
         s["string_session"] = session_string
