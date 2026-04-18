@@ -842,9 +842,11 @@ class TelegramClientManager:
                 self.thread = None
         self.stop_flag.clear()
         self.is_ready.clear()
+        self.loop = None  # إعادة تعيين الـ loop صراحةً قبل إنشاء thread جديد
         self.keep_alive = True
         self.reconnect_attempts = 0
         self.thread = threading.Thread(target=self._run_client_loop, daemon=True)
+        self.thread.daemon = True
         self.thread.start()
         ready = self.is_ready.wait(timeout=30)
         if not ready:
@@ -855,7 +857,7 @@ class TelegramClientManager:
     def _run_client_loop(self):
         try:
             self.loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.loop)
+            # لا نستخدم set_event_loop لتجنب تعارض اللوبات مع gunicorn/threads
             string_session = self._get_string_session()
             if string_session:
                 self.client = TelegramClient(StringSession(string_session), int(API_ID), API_HASH, loop=self.loop)
@@ -1320,16 +1322,31 @@ class TelegramClientManager:
 
     # ========== دوال الكشف عن المجموعات المحمية ==========
     def _is_protection_bot(self, username):
+        # بوتات الحماية والأمان المعروفة
         protection_bots = [
-            'shieldy_bot', 'antispam_bot', 'rose_bot', 'group_guard_bot',
-            'spambot', 'security_bot', 'protect_bot', 'guard_bot',
-            'antipromotion_bot', 'antilink_bot', 'captcha_bot',
-            'verify_bot', 'safeguard_bot', 'defender_bot', 'combot',
-            'missrose_bot', 'groupbutler_bot'
+            'shieldy', 'antispam', 'rose_bot', 'missrose', 'group_guard',
+            'spamwatch', 'security_bot', 'protect_bot', 'guard_bot',
+            'antipromotion', 'antilink', 'captchabot', 'captcha_bot',
+            'verify_bot', 'safeguard', 'defender_bot', 'combot',
+            'groupbutler', 'ban_hammer', 'banhammer', 'spam_bot',
+            'adminbot', 'anti_spam', 'antinudebot', 'grouphelpbot',
+            'policeman', 'cas_bot', 'sber_anti_spam', 'tg_spam_bot',
+            'cleanerbot', 'arabic_spam', 'spam_shield', 'tgspam',
+            'SpamProtectionBot', 'nightbot', 'moderatorbot',
+            'ProtectionBot', 'securitybot', 'جروب', 'حماية',
         ]
         username_lower = username.lower()
+        # كلمات دالة على الحماية في اسم البوت
+        protection_keywords = [
+            'spam', 'guard', 'protect', 'security', 'shield', 'ban',
+            'antispam', 'anti_spam', 'captcha', 'verify', 'safe',
+            'clean', 'mod', 'police', 'filter', 'block'
+        ]
         for bot in protection_bots:
-            if bot in username_lower:
+            if bot.lower() in username_lower:
+                return True
+        for kw in protection_keywords:
+            if kw in username_lower and 'bot' in username_lower:
                 return True
         return False
 
@@ -1464,8 +1481,33 @@ class TelegramClientManager:
 
             except Exception as e:
                 errors += 1
-                socketio.emit('log_update', {"message": f"❌ [{i+1}/{total}] {group}: {str(e)[:80]}"}, to=self.user_id)
-                socketio.emit('send_progress', {"current": i+1, "total": total, "sent": sent, "errors": errors, "skipped": skipped, "forced": forced, "pending": pending_count, "status": "sending", "current_group": group, "result": "error"}, to=self.user_id)
+                err_str = str(e)
+                # كشف أخطاء الحماية ومنع الإرسال
+                protection_errors = [
+                    'ChatAdminRequiredError', 'ChatWriteForbiddenError',
+                    'UserBannedInChannelError', 'ChatAdminRequired',
+                    'ChatWriteForbidden', 'CHAT_WRITE_FORBIDDEN',
+                    'CHAT_ADMIN_REQUIRED', 'USER_BANNED_IN_CHANNEL',
+                    'banned', 'forbidden', 'not allowed', 'restricted',
+                    'admin privileges', 'not permitted'
+                ]
+                is_protection_error = any(p.lower() in err_str.lower() for p in protection_errors)
+                if is_protection_error:
+                    chat_name_err = group
+                    chat_link_err = f"https://t.me/{group.lstrip('@')}" if group.startswith('@') else group
+                    socketio.emit('log_update', {"message": f"🛡️ [{i+1}/{total}] {chat_name_err}: محمية أو تمنع الإرسال - تم استثناؤها"}, to=self.user_id)
+                    socketio.emit('protected_group_detected', {
+                        'group_id': group,
+                        'group_name': chat_name_err,
+                        'group_link': chat_link_err,
+                        'entity_str': group,
+                        'reason': 'send_forbidden',
+                        'error': err_str[:100]
+                    }, to=self.user_id)
+                    socketio.emit('send_progress', {"current": i+1, "total": total, "sent": sent, "errors": errors, "skipped": skipped, "forced": forced, "pending": pending_count, "status": "sending", "current_group": group, "result": "protected"}, to=self.user_id)
+                else:
+                    socketio.emit('log_update', {"message": f"❌ [{i+1}/{total}] {group}: {err_str[:80]}"}, to=self.user_id)
+                    socketio.emit('send_progress', {"current": i+1, "total": total, "sent": sent, "errors": errors, "skipped": skipped, "forced": forced, "pending": pending_count, "status": "sending", "current_group": group, "result": "error"}, to=self.user_id)
                 with USERS_LOCK:
                     ud2 = USERS.get(self.user_id)
                     if ud2:
