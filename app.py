@@ -855,21 +855,24 @@ class TelegramClientManager:
         return ready
 
     def _run_client_loop(self):
-        try:
-            self.loop = asyncio.new_event_loop()
-            # لا نستخدم set_event_loop لتجنب تعارض اللوبات مع gunicorn/threads
+        async def _async_entry():
+            # نحصل على الـ loop النشط الذي أنشأه asyncio.run() مباشرةً
+            self.loop = asyncio.get_running_loop()
             string_session = self._get_string_session()
+            # لا نمرر loop= لتجنب تعارض Telethon مع الـ loop الداخلي
             if string_session:
-                self.client = TelegramClient(StringSession(string_session), int(API_ID), API_HASH, loop=self.loop)
+                self.client = TelegramClient(StringSession(string_session), int(API_ID), API_HASH)
             else:
-                self.client = TelegramClient(StringSession(), int(API_ID), API_HASH, loop=self.loop)
-            self.loop.run_until_complete(self._client_main())
+                self.client = TelegramClient(StringSession(), int(API_ID), API_HASH)
+            await self._client_main()
+
+        try:
+            asyncio.run(_async_entry())
         except Exception as e:
             add_error("client_thread", str(e), traceback.format_exc())
             self.is_ready.set()
         finally:
-            if self.loop and not self.loop.is_closed():
-                self.loop.close()
+            self.loop = None
 
     async def _client_main(self):
         try:
@@ -1792,7 +1795,13 @@ def ensure_client_running(uid):
         thread_dead = (ud.client_manager.thread is None or not ud.client_manager.thread.is_alive())
         if loop_dead or thread_dead:
             logger.warning(f"Recreating client manager for {uid} (loop_dead={loop_dead}, thread_dead={thread_dead})")
-            old_settings = load_settings(uid)
+            # إيقاف الـ manager القديم أولاً وانتظار انتهاء thread-ه
+            try:
+                ud.client_manager.stop()
+                if ud.client_manager.thread and ud.client_manager.thread.is_alive():
+                    ud.client_manager.thread.join(timeout=8)
+            except Exception as stop_err:
+                logger.warning(f"Error stopping old manager for {uid}: {stop_err}")
             ud.client_manager = TelegramClientManager(uid)
             logger.info(f"Recreated client manager for {uid}")
 
