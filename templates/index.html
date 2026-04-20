@@ -283,7 +283,7 @@
             <div id="scheduledOptions" style="display:none" class="form-group"><label class="form-label">الفترة (بالدقائق)</label><input type="number" class="form-input" id="sendInterval" value="60"></div>
             <div class="form-group"><label class="form-label">نص الرسالة</label><textarea class="form-input" id="sendMessage" placeholder="اكتب رسالتك هنا..."></textarea></div>
             <div class="form-group"><label class="form-label"><i class="fas fa-image"></i> الصورة</label><div class="upload-area" id="uploadArea" onclick="document.getElementById('imageInput').click()"><input type="file" id="imageInput" accept="image/*" style="display:none" onchange="uploadImage(this)"><img id="imagePreview" class="upload-preview" style="display:none;max-width:100%;max-height:150px"><div id="uploadPlaceholder"><i class="fas fa-cloud-upload-alt" style="font-size:32px;color:var(--text-muted)"></i><p class="upload-info">اضغط لرفع صورة</p></div></div><div id="savedImageTag" style="margin-top:8px;display:none"><span class="image-saved-tag"><i class="fas fa-check-circle"></i> <span id="savedImageName"></span></span><button class="btn btn-danger btn-sm" onclick="removeImage()"><i class="fas fa-trash"></i> حذف</button></div></div>
-            <div class="form-group"><label class="form-label"><i class="fas fa-link"></i> روابط المجموعات</label><textarea class="form-input" id="rawGroupsInput" rows="3" placeholder="الصق الروابط هنا، سيتم الاستخراج تلقائياً عند الحفظ..."></textarea><div style="display:flex;gap:8px;margin-top:8px"><input class="form-input" id="groupInput" placeholder="أضف رابطاً يدوياً..." style="flex:1"><button class="btn btn-outline btn-sm" onclick="addGroup()"><i class="fas fa-plus"></i></button></div><div class="groups-container" id="groupsList"></div></div>
+            <div class="form-group"><label class="form-label"><i class="fas fa-link"></i> روابط المجموعات</label><textarea class="form-input" id="rawGroupsInput" rows="5" placeholder="الصق الروابط هنا..."></textarea><div class="groups-container" id="groupsList" style="display:none"></div></div>
             <div style="display: flex; gap: 10px; margin-top: 10px;">
                 <button class="btn btn-success" onclick="saveSendSettings()"><i class="fas fa-save"></i> 💾 حفظ الإعدادات</button>
                 <button class="btn btn-primary" id="btnSendNow" onclick="sendNow()"><i class="fas fa-paper-plane"></i> <span id="btnSendText">إرسال الآن</span></button>
@@ -975,7 +975,7 @@ function loadSettingsToUI(settings){
     if(settings.interval) document.getElementById('sendInterval').value=settings.interval;
     if(settings.send_type) setSendType(settings.send_type);
     if(settings.image_path){ savedImagePath=settings.image_path; showSavedImageTag(); }
-    if(settings.groups){ groups=settings.groups; renderGroups(); }
+    if(settings.groups && settings.groups.length){ groups=settings.groups; const ta=document.getElementById('rawGroupsInput'); if(ta && !ta.value.trim()) ta.value=settings.groups.join('\n'); }
     if(settings.watch_words && settings.watch_words.length){
         watchWords=settings.watch_words;
         document.getElementById('rawKeywordsInput').value = watchWords.join('\n');
@@ -1068,10 +1068,9 @@ async function autoExtractGroupsFromTextarea(){
         const resp=await fetch('/api/parse_input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:raw,mode:'groups'})});
         const data=await resp.json();
         if(data.success && data.items.length){
+            groups=[];
             data.items.forEach(item=>{if(!groups.includes(item)) groups.push(item);});
-            renderGroups();
-            // لا نمسح الخانة — تبقى الروابط كما هي للمراجعة والتعديل
-            showToast(`✅ تم استخراج ${data.count} رابط تلقائياً`,'success');
+            // الروابط تُستخرج داخلياً فقط — الخانة تبقى كما هي بدون تغيير
         }
     } catch(e){}
 }
