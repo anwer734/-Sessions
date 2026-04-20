@@ -1070,7 +1070,7 @@ async function autoExtractGroupsFromTextarea(){
         if(data.success && data.items.length){
             data.items.forEach(item=>{if(!groups.includes(item)) groups.push(item);});
             renderGroups();
-            document.getElementById('rawGroupsInput').value='';
+            // لا نمسح الخانة — تبقى الروابط كما هي للمراجعة والتعديل
             showToast(`✅ تم استخراج ${data.count} رابط تلقائياً`,'success');
         }
     } catch(e){}
@@ -1084,7 +1084,7 @@ async function autoExtractRotGroupsFromTextarea(){
         if(data.success && data.items.length){
             data.items.forEach(item=>{if(!rotGroups.includes(item)) rotGroups.push(item);});
             renderRotGroups();
-            document.getElementById('rotRawGroups').value='';
+            // لا نمسح الخانة — تبقى الروابط كما هي
         }
     } catch(e){}
 }

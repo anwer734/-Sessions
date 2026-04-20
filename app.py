@@ -3,6 +3,7 @@ import json
 import time
 import logging
 import asyncio
+import concurrent.futures
 import threading
 import re
 import uuid
@@ -1201,7 +1202,17 @@ class TelegramClientManager:
             if not restarted or not self.loop or self.loop.is_closed():
                 raise Exception("Event loop not initialized or closed")
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        return future.result(timeout=timeout)
+        # انتظار بخطوات صغيرة لتحرير GIL وتقليل التأخير
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                return future.result(timeout=0.5)
+            except concurrent.futures.TimeoutError:
+                if future.done():
+                    return future.result(timeout=0)
+                continue
+        future.cancel()
+        raise concurrent.futures.TimeoutError(f"Coroutine timed out after {timeout}s")
 
     def stop(self):
         self.keep_alive = False
