@@ -70,7 +70,7 @@ GITHUB_REPO = "anwer734/-Sessions"
 GITHUB_BRANCH = "main"
 
 # ========== متغيرات التحكم ==========
-app_ready = True
+app_ready = False
 app_initializing = False
 init_lock = threading.Lock()
 errors_list = []
