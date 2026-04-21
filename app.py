@@ -3,7 +3,6 @@ import json
 import time
 import logging
 import asyncio
-import concurrent.futures
 import threading
 import re
 import uuid
@@ -26,15 +25,21 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SESSION_SECRET", "telegram_secret_2024")
-app.config['PERMANENT_SESSION_LIFETIME'] = 3600 * 24 * 30
+app.secret_key = os.environ.get("SESSION_SECRET", "telegram_secret_2024_persistent_key_v2")
+app.config['PERMANENT_SESSION_LIFETIME'] = 3600 * 24 * 365
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = False
+_IS_RENDER = bool(os.environ.get("RENDER") or os.environ.get("RENDER_EXTERNAL_URL"))
+app.config['SESSION_COOKIE_SECURE'] = _IS_RENDER
+app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "772997043anwer"
+
+@app.before_request
+def _make_session_permanent():
+    session.permanent = True
 
 socketio = SocketIO(
     app,
@@ -44,8 +49,8 @@ socketio = SocketIO(
     ping_interval=25,
     logger=False,
     engineio_logger=False,
-    allow_upgrades=False,
-    transports=['polling']
+    allow_upgrades=True,
+    transports=['websocket', 'polling']
 )
 
 # ========== مجلدات التطبيق ==========
@@ -63,22 +68,18 @@ API_HASH = '56f64582b363d367280db96586b97801'
 DATA_FILE = "academic_knowledge.json"
 
 # ========== إعدادات GitHub (لحفظ الجلسات) ==========
-_GH_A = "ghp" + "_611gVawp4ym30"
-_GH_B = "DfSTlYo1AzbFojINe4QkNQf"
-GITHUB_TOKEN = _GH_A + _GH_B
-GITHUB_REPO = "anwer734/-Sessions"
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 GITHUB_BRANCH = "main"
 
 # ========== متغيرات التحكم ==========
 app_ready = False
-app_initializing = False
+app_initializing = True
 init_lock = threading.Lock()
 errors_list = []
 errors_lock = Lock()
 
 # ========== دوال GitHub ==========
-_SESSION_SHA_CACHE = {}
-
 def upload_session_to_github(session_string, user_id):
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return False
@@ -88,28 +89,21 @@ def upload_session_to_github(session_string, user_id):
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
         for attempt in range(3):
-            sha = _SESSION_SHA_CACHE.get(user_id)
-            if not sha:
-                try:
-                    resp = requests.get(url, headers=headers, timeout=10)
-                    if resp.status_code == 200:
-                        sha = resp.json().get("sha")
-                        if sha:
-                            _SESSION_SHA_CACHE[user_id] = sha
-                except:
-                    pass
+            sha = None
+            try:
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    sha = resp.json().get("sha")
+            except:
+                pass
             data = {"message": f"Update session for {user_id}", "content": content_base64, "branch": GITHUB_BRANCH}
             if sha:
                 data["sha"] = sha
             resp = requests.put(url, headers=headers, json=data, timeout=15)
             if resp.status_code in [200, 201]:
-                new_sha = resp.json().get("content", {}).get("sha")
-                if new_sha:
-                    _SESSION_SHA_CACHE[user_id] = new_sha
                 logger.info(f"✅ Session for {user_id} uploaded to GitHub")
                 return True
             elif resp.status_code == 409:
-                _SESSION_SHA_CACHE.pop(user_id, None)
                 time.sleep(1 + attempt)
                 continue
             else:
@@ -164,20 +158,53 @@ def delete_session_from_github(user_id):
 def backup_all_sessions_to_github():
     with USERS_LOCK:
         uids = list(USERS.keys())
-
-    def backup_one(uid):
+    success_count = 0
+    for uid in uids:
         ud = get_or_create_user(uid)
-        session_string = ud.string_session
-        if not session_string:
+        if ud.string_session:
+            if upload_session_to_github(ud.string_session, uid):
+                success_count += 1
+        else:
             settings = load_settings(uid)
-            session_string = settings.get("string_session")
-        if session_string:
-            return upload_session_to_github(session_string, uid)
-        return False
+            if settings.get("string_session"):
+                if upload_session_to_github(settings["string_session"], uid):
+                    success_count += 1
+    return success_count
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(backup_one, uids))
-    return sum(1 for r in results if r)
+def upload_settings_to_github(user_id, settings):
+    """يرفع ملف الإعدادات الكامل (JSON) إلى GitHub لاستعادته بعد إعادة تشغيل Render."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return False
+    try:
+        safe_settings = {k: v for k, v in settings.items() if k != "string_session"}
+        content = json.dumps(safe_settings, ensure_ascii=False, indent=2)
+        file_name = f"settings_{user_id}.json"
+        content_b64 = base64.b64encode(content.encode('utf-8')).decode('utf-8')
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+        for attempt in range(3):
+            sha = None
+            try:
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    sha = r.json().get("sha")
+            except:
+                pass
+            data = {"message": f"Update settings for {user_id}", "content": content_b64, "branch": GITHUB_BRANCH}
+            if sha:
+                data["sha"] = sha
+            r = requests.put(url, headers=headers, json=data, timeout=15)
+            if r.status_code in (200, 201):
+                return True
+            elif r.status_code == 409:
+                time.sleep(1 + attempt)
+                continue
+            else:
+                return False
+        return False
+    except Exception as e:
+        add_error("github_upload_settings", str(e), f"user_id: {user_id}")
+        return False
 
 def restore_all_sessions_from_github():
     if not GITHUB_TOKEN or not GITHUB_REPO:
@@ -187,42 +214,83 @@ def restore_all_sessions_from_github():
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
         resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code != 200:
-            return 0
-        files = resp.json()
-        session_files = [f for f in files if f.get("name", "").startswith("session_") and f.get("name", "").endswith(".txt")]
+        if resp.status_code == 200:
+            files = resp.json()
+            restored = 0
+            settings_files = {}
+            session_files = {}
+            for file_info in files:
+                file_name = file_info.get("name", "")
+                if file_name.startswith("settings_") and file_name.endswith(".json"):
+                    uid_s = file_name.replace("settings_", "").replace(".json", "")
+                    settings_files[uid_s] = file_info
+                elif file_name.startswith("session_") and file_name.endswith(".txt"):
+                    uid_s = file_name.replace("session_", "").replace(".txt", "")
+                    session_files[uid_s] = file_info
 
-        def restore_one(file_info):
-            file_name = file_info.get("name", "")
-            user_id = file_name.replace("session_", "").replace(".txt", "")
-            sha = file_info.get("sha")
-            if sha:
-                _SESSION_SHA_CACHE[user_id] = sha
-            content_base64 = file_info.get("content", "")
-            if not content_base64:
-                download_url = file_info.get("download_url")
-                if not download_url:
-                    return False
+            def _fetch_content(file_info):
+                content_b64 = file_info.get("content", "")
+                if content_b64:
+                    try:
+                        return base64.b64decode(content_b64).decode('utf-8')
+                    except:
+                        pass
+                durl = file_info.get("download_url")
+                if durl:
+                    try:
+                        cr = requests.get(durl, timeout=15)
+                        if cr.status_code == 200:
+                            return cr.text
+                    except:
+                        pass
+                return None
+
+            for uid_s, finfo in settings_files.items():
+                content = _fetch_content(finfo)
+                if not content:
+                    continue
                 try:
-                    content_resp = requests.get(download_url, timeout=10)
-                    if content_resp.status_code != 200:
-                        return False
-                    session_string = content_resp.text.strip()
+                    remote_settings = json.loads(content)
                 except:
-                    return False
-            else:
-                session_string = base64.b64decode(content_base64.replace("\n", "")).decode('utf-8')
-            settings = load_settings(user_id)
-            settings["string_session"] = session_string
-            save_settings(user_id, settings)
-            ud = get_or_create_user(user_id)
-            ud.string_session = session_string
-            logger.info(f"Restored session for {user_id} from GitHub")
-            return True
+                    continue
+                local_path = os.path.join(SESSIONS_DIR, f"{uid_s}.json")
+                local_settings = {}
+                if os.path.exists(local_path):
+                    try:
+                        with open(local_path, "r", encoding="utf-8") as f:
+                            local_settings = json.load(f)
+                    except:
+                        local_settings = {}
+                local_session_str = local_settings.get("string_session", "")
+                merged = remote_settings
+                if local_session_str:
+                    merged["string_session"] = local_session_str
+                try:
+                    with open(local_path, "w", encoding="utf-8") as f:
+                        json.dump(merged, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Restored settings for {uid_s} from GitHub")
+                except:
+                    pass
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            results = list(executor.map(restore_one, session_files))
-        return sum(1 for r in results if r)
+            for user_id, finfo in session_files.items():
+                session_string = _fetch_content(finfo)
+                if not session_string:
+                    continue
+                session_string = session_string.strip()
+                settings = load_settings(user_id)
+                settings["string_session"] = session_string
+                try:
+                    path = os.path.join(SESSIONS_DIR, f"{user_id}.json")
+                    with open(path, "w", encoding="utf-8") as f:
+                        json.dump(settings, f, ensure_ascii=False, indent=2)
+                except:
+                    pass
+                ud = get_or_create_user(user_id)
+                ud.string_session = session_string
+                restored += 1
+                logger.info(f"Restored session for {user_id} from GitHub")
+            return restored
+        return 0
     except Exception as e:
         add_error("github_restore_all", str(e), "")
         return 0
@@ -446,64 +514,27 @@ LOADING_PAGE = """
             max-width: 90%;
             width: 400px;
         }
-        .app-icon {
-            width: 110px;
-            height: 110px;
-            border-radius: 24px;
-            margin: 0 auto 1.5rem auto;
-            display: block;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-            animation: pulse 2s ease-in-out infinite;
+        .loader {
+            width: 50px;
+            height: 50px;
+            border: 5px solid rgba(255,255,255,0.3);
+            border-top: 5px solid white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 1.5rem auto;
         }
-        @keyframes pulse {
-            0%, 100% { transform: scale(1); box-shadow: 0 8px 32px rgba(0,0,0,0.3); }
-            50% { transform: scale(1.05); box-shadow: 0 12px 40px rgba(0,0,0,0.4); }
-        }
-        h1 { font-size: 1.3rem; margin-bottom: 0.8rem; }
-        p { font-size: 0.9rem; opacity: 0.85; }
-        .footer { margin-top: 1.5rem; font-size: 0.78rem; opacity: 0.6; }
-        .dots { display: inline-block; }
-        .dots span { animation: blink 1.4s infinite; opacity: 0; }
-        .dots span:nth-child(2) { animation-delay: 0.2s; }
-        .dots span:nth-child(3) { animation-delay: 0.4s; }
-        @keyframes blink { 0%,80%,100%{opacity:0} 40%{opacity:1} }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .footer { margin-top: 2rem; font-size: 0.8rem; opacity: 0.7; }
     </style>
 </head>
 <body>
     <div class="container">
-        <img src="/static/icons/icon-192.png" class="app-icon" alt="أيقونة التطبيق">
         <h1>جاري تحميل وظائف التطبيق</h1>
-        <p>يرجى الانتظار ثوانٍ<span class="dots"><span>.</span><span>.</span><span>.</span></span></p>
+        <div class="loader"></div>
+        <p>يرجى الانتظار ثوانٍ...</p>
         <p class="footer">سيتم تحويلك تلقائياً</p>
     </div>
-    <script>
-        let attempts = 0;
-        const maxAttempts = 60;
-        function checkReady() {
-            attempts++;
-            fetch('/ping').then(r => {
-                if (r.ok) {
-                    fetch('/api/ready_check').then(res => res.json()).then(data => {
-                        if (data.ready) {
-                            window.location.href = '/';
-                        } else if (attempts < maxAttempts) {
-                            setTimeout(checkReady, 2000);
-                        } else {
-                            window.location.href = '/';
-                        }
-                    }).catch(() => {
-                        if (attempts < maxAttempts) setTimeout(checkReady, 2000);
-                        else window.location.href = '/';
-                    });
-                } else {
-                    if (attempts < maxAttempts) setTimeout(checkReady, 2000);
-                }
-            }).catch(() => {
-                if (attempts < maxAttempts) setTimeout(checkReady, 2000);
-            });
-        }
-        setTimeout(checkReady, 3000);
-    </script>
+    <script>setTimeout(() => { window.location.href = '/'; }, 3000);</script>
 </body>
 </html>
 """
@@ -556,6 +587,22 @@ PREDEFINED_USERS = {
 USERS = {}
 USERS_LOCK = Lock()
 
+_LAST_SETTINGS_BACKUP = {}
+_SETTINGS_BACKUP_LOCK = Lock()
+
+def _maybe_backup_settings(user_id, settings):
+    """يرفع الإعدادات إلى GitHub بحدّ أقصى مرة كل 30 ثانية لكل مستخدم لتجنّب تجاوز حدود API."""
+    try:
+        with _SETTINGS_BACKUP_LOCK:
+            last = _LAST_SETTINGS_BACKUP.get(user_id, 0)
+            now = time.time()
+            if now - last < 30:
+                return
+            _LAST_SETTINGS_BACKUP[user_id] = now
+        threading.Thread(target=upload_settings_to_github, args=(user_id, dict(settings)), daemon=True).start()
+    except:
+        pass
+
 def save_settings(user_id, settings):
     try:
         path = os.path.join(SESSIONS_DIR, f"{user_id}.json")
@@ -563,6 +610,7 @@ def save_settings(user_id, settings):
             json.dump(settings, f, ensure_ascii=False, indent=2)
         if settings.get("string_session"):
             threading.Thread(target=upload_session_to_github, args=(settings["string_session"], user_id), daemon=True).start()
+        _maybe_backup_settings(user_id, settings)
         return True
     except Exception as e:
         add_error("settings_save", str(e), f"user_id: {user_id}")
@@ -861,37 +909,32 @@ class TelegramClientManager:
                 self.thread = None
         self.stop_flag.clear()
         self.is_ready.clear()
-        self.loop = None  # إعادة تعيين الـ loop صراحةً قبل إنشاء thread جديد
         self.keep_alive = True
         self.reconnect_attempts = 0
         self.thread = threading.Thread(target=self._run_client_loop, daemon=True)
-        self.thread.daemon = True
         self.thread.start()
-        ready = self.is_ready.wait(timeout=30)
+        ready = self.is_ready.wait(timeout=15)
         if not ready:
             add_error("client_start", f"Client thread for {self.user_id} did not become ready", "")
             logger.error(f"Client thread for {self.user_id} did not become ready within 30 seconds")
         return ready
 
     def _run_client_loop(self):
-        async def _async_entry():
-            # نحصل على الـ loop النشط الذي أنشأه asyncio.run() مباشرةً
-            self.loop = asyncio.get_running_loop()
-            string_session = self._get_string_session()
-            # لا نمرر loop= لتجنب تعارض Telethon مع الـ loop الداخلي
-            if string_session:
-                self.client = TelegramClient(StringSession(string_session), int(API_ID), API_HASH)
-            else:
-                self.client = TelegramClient(StringSession(), int(API_ID), API_HASH)
-            await self._client_main()
-
         try:
-            asyncio.run(_async_entry())
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
+            string_session = self._get_string_session()
+            if string_session:
+                self.client = TelegramClient(StringSession(string_session), int(API_ID), API_HASH, loop=self.loop)
+            else:
+                self.client = TelegramClient(StringSession(), int(API_ID), API_HASH, loop=self.loop)
+            self.loop.run_until_complete(self._client_main())
         except Exception as e:
             add_error("client_thread", str(e), traceback.format_exc())
             self.is_ready.set()
         finally:
-            self.loop = None
+            if self.loop and not self.loop.is_closed():
+                self.loop.close()
 
     async def _client_main(self):
         try:
@@ -904,10 +947,6 @@ class TelegramClientManager:
                 self._save_string_session(session_string)
             await self._register_event_handlers()
             if await self.client.is_user_authorized():
-                _should_start_scheduled = False
-                _sched_args = {}
-                _should_start_rotating = False
-                _rot_args = {}
                 with USERS_LOCK:
                     ud = USERS.get(self.user_id)
                     if ud:
@@ -923,29 +962,19 @@ class TelegramClientManager:
                             ud.scheduled_message = ud.settings.get('scheduled_message', '')
                             ud.scheduled_image = ud.settings.get('scheduled_image')
                             if ud.scheduled_active and ud.scheduled_interval > 0 and ud.scheduled_groups:
-                                _should_start_scheduled = True
-                                _sched_args = {
-                                    'groups': ud.scheduled_groups,
-                                    'message': ud.scheduled_message,
-                                    'image_path': ud.scheduled_image,
-                                    'interval_minutes': ud.scheduled_interval
-                                }
+                                self.start_scheduled(
+                                    ud.scheduled_groups,
+                                    ud.scheduled_message,
+                                    ud.scheduled_image,
+                                    ud.scheduled_interval
+                                )
                         if ud.settings.get('rotating_active'):
                             ud.rotating_active = True
                             ud.rotating_messages = ud.settings.get('rotating_messages', ["", "", "", "", ""])
                             ud.rotating_groups = ud.settings.get('rotating_groups', [])
                             ud.rotating_interval = ud.settings.get('rotating_interval', 5)
                             if ud.rotating_active and ud.rotating_groups and any(msg.strip() for msg in ud.rotating_messages):
-                                _should_start_rotating = True
-                                _rot_args = {
-                                    'groups': ud.rotating_groups,
-                                    'messages': ud.rotating_messages,
-                                    'interval_minutes': ud.rotating_interval
-                                }
-                if _should_start_scheduled:
-                    self.start_scheduled(**_sched_args)
-                if _should_start_rotating:
-                    self.start_rotating(**_rot_args)
+                                self.start_rotating(ud.rotating_groups, ud.rotating_messages, ud.rotating_interval)
                 try:
                     me = await self.client.get_me()
                     if me:
@@ -967,10 +996,11 @@ class TelegramClientManager:
                 logger.info(f"Client for {self.user_id} not authorized yet")
 
             last_ping = time.time()
+            consecutive_auth_fail = 0
             while not self.stop_flag.is_set() and self.keep_alive:
                 await asyncio.sleep(5)
                 try:
-                    if time.time() - last_ping > 30:
+                    if time.time() - last_ping > 60:
                         last_ping = time.time()
                         if self.client and self.client.is_connected():
                             with USERS_LOCK:
@@ -978,16 +1008,36 @@ class TelegramClientManager:
                                 was_authenticated = ud_check.authenticated if ud_check else False
                                 awaiting = ud_check.awaiting_password if ud_check else False
                             if was_authenticated and not awaiting:
-                                still_auth = await self.client.is_user_authorized()
+                                try:
+                                    still_auth = await asyncio.wait_for(
+                                        self.client.is_user_authorized(), timeout=15)
+                                except asyncio.TimeoutError:
+                                    logger.warning(f"Auth check timeout for {self.user_id} (transient)")
+                                    continue
                                 if not still_auth:
-                                    logger.warning(f"⚠️ {self.user_id} session no longer valid")
-                                    await self._handle_session_revoked()
-                                    break
+                                    consecutive_auth_fail += 1
+                                    logger.warning(f"⚠️ {self.user_id} auth check failed ({consecutive_auth_fail}/3)")
+                                    if consecutive_auth_fail >= 3:
+                                        logger.error(f"🔴 {self.user_id} session confirmed invalid after 3 checks")
+                                        await self._handle_session_revoked()
+                                        break
+                                    try:
+                                        await self.client.disconnect()
+                                    except:
+                                        pass
+                                    try:
+                                        await self.client.connect()
+                                    except:
+                                        pass
+                                else:
+                                    consecutive_auth_fail = 0
                         else:
                             logger.warning(f"Client {self.user_id} disconnected, reconnecting...")
-                            await self.client.connect()
-                            # بعد إعادة الاتصال، أعد تسجيل المعالجات
-                            await self._register_event_handlers()
+                            try:
+                                await self.client.connect()
+                                await self._register_event_handlers()
+                            except Exception as rc_err:
+                                logger.warning(f"Reconnect failed for {self.user_id}: {rc_err}")
                 except errors.FloodWaitError as e:
                     wait = e.seconds
                     add_error("flood_wait", f"FloodWait {wait}s for {self.user_id}", "")
@@ -1026,7 +1076,8 @@ class TelegramClientManager:
                 ud.monitoring_active = False
                 ud.is_running = False
                 ud.rotating_active = False
-        threading.Thread(target=delete_session_from_github, args=(self.user_id,), daemon=True).start()
+        # ملاحظة: نُبقي الجلسة في GitHub احتياطاً (لا نحذفها تلقائياً)
+        # المستخدم يستطيع حذفها يدوياً عبر تسجيل الخروج
         session_file = os.path.join(SESSIONS_DIR, f"{self.user_id}.session")
         if os.path.exists(session_file):
             try:
@@ -1168,23 +1219,6 @@ class TelegramClientManager:
                                 socketio.emit('stats_update', dict(ud2.stats), to=self.user_id)
                         socketio.emit('new_alert', alert, to=self.user_id)
                         socketio.emit('log_update', {"message": f"🚨 تنبيه: '{kw}' في [{chat_title}] من [{sender_name}]"}, to=self.user_id)
-                        # إرسال تنبيه فوري إلى حساب Telegram الخاص
-                        try:
-                            group_link = f"https://t.me/{chat_username}" if chat_username else f"(ID: {chat_id})"
-                            tg_alert = (
-                                f"🚨 **تنبيه مراقبة** 🚨\n\n"
-                                f"🔑 **الكلمة:** `{kw}`\n"
-                                f"👥 **المجموعة:** {chat_title}\n"
-                                f"🔗 **الرابط:** {group_link}\n"
-                                f"👤 **المرسل:** {sender_name}\n"
-                                f"🕐 **الوقت:** {datetime.now().strftime('%H:%M:%S')}\n\n"
-                                f"💬 **الرسالة:**\n{msg_text[:300]}"
-                            )
-                            await self.client.send_message('me', tg_alert, parse_mode='md')
-                            socketio.emit('log_update', {"message": f"📩 تم إرسال التنبيه إلى حسابك على Telegram"}, to=self.user_id)
-                        except Exception as tg_err:
-                            logger.warning(f"فشل إرسال تنبيه Telegram: {tg_err}")
-                            add_error("monitoring_notify", str(tg_err), f"user: {self.user_id}")
 
             fresh_rules = load_settings(self.user_id)
             live_auto_replies = fresh_rules.get('auto_replies', [])
@@ -1213,24 +1247,10 @@ class TelegramClientManager:
             add_error("message_handler", str(e), f"user: {self.user_id}")
 
     def run_coroutine(self, coro, timeout=30):
-        # إذا كان الـ loop مغلقاً أو غير موجود، حاول إعادة تشغيل الـ thread
         if not self.loop or self.loop.is_closed():
-            logger.warning(f"Loop closed/None for {self.user_id}, attempting restart...")
-            restarted = self.start_client_thread()
-            if not restarted or not self.loop or self.loop.is_closed():
-                raise Exception("Event loop not initialized or closed")
+            raise Exception("Event loop not initialized or closed")
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-        # انتظار بخطوات صغيرة لتحرير GIL وتقليل التأخير
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                return future.result(timeout=0.5)
-            except concurrent.futures.TimeoutError:
-                if future.done():
-                    return future.result(timeout=0)
-                continue
-        future.cancel()
-        raise concurrent.futures.TimeoutError(f"Coroutine timed out after {timeout}s")
+        return future.result(timeout=timeout)
 
     def stop(self):
         self.keep_alive = False
@@ -1354,31 +1374,16 @@ class TelegramClientManager:
 
     # ========== دوال الكشف عن المجموعات المحمية ==========
     def _is_protection_bot(self, username):
-        # بوتات الحماية والأمان المعروفة
         protection_bots = [
-            'shieldy', 'antispam', 'rose_bot', 'missrose', 'group_guard',
-            'spamwatch', 'security_bot', 'protect_bot', 'guard_bot',
-            'antipromotion', 'antilink', 'captchabot', 'captcha_bot',
-            'verify_bot', 'safeguard', 'defender_bot', 'combot',
-            'groupbutler', 'ban_hammer', 'banhammer', 'spam_bot',
-            'adminbot', 'anti_spam', 'antinudebot', 'grouphelpbot',
-            'policeman', 'cas_bot', 'sber_anti_spam', 'tg_spam_bot',
-            'cleanerbot', 'arabic_spam', 'spam_shield', 'tgspam',
-            'SpamProtectionBot', 'nightbot', 'moderatorbot',
-            'ProtectionBot', 'securitybot', 'جروب', 'حماية',
+            'shieldy_bot', 'antispam_bot', 'rose_bot', 'group_guard_bot',
+            'spambot', 'security_bot', 'protect_bot', 'guard_bot',
+            'antipromotion_bot', 'antilink_bot', 'captcha_bot',
+            'verify_bot', 'safeguard_bot', 'defender_bot', 'combot',
+            'missrose_bot', 'groupbutler_bot'
         ]
         username_lower = username.lower()
-        # كلمات دالة على الحماية في اسم البوت
-        protection_keywords = [
-            'spam', 'guard', 'protect', 'security', 'shield', 'ban',
-            'antispam', 'anti_spam', 'captcha', 'verify', 'safe',
-            'clean', 'mod', 'police', 'filter', 'block'
-        ]
         for bot in protection_bots:
-            if bot.lower() in username_lower:
-                return True
-        for kw in protection_keywords:
-            if kw in username_lower and 'bot' in username_lower:
+            if bot in username_lower:
                 return True
         return False
 
@@ -1513,33 +1518,8 @@ class TelegramClientManager:
 
             except Exception as e:
                 errors += 1
-                err_str = str(e)
-                # كشف أخطاء الحماية ومنع الإرسال
-                protection_errors = [
-                    'ChatAdminRequiredError', 'ChatWriteForbiddenError',
-                    'UserBannedInChannelError', 'ChatAdminRequired',
-                    'ChatWriteForbidden', 'CHAT_WRITE_FORBIDDEN',
-                    'CHAT_ADMIN_REQUIRED', 'USER_BANNED_IN_CHANNEL',
-                    'banned', 'forbidden', 'not allowed', 'restricted',
-                    'admin privileges', 'not permitted'
-                ]
-                is_protection_error = any(p.lower() in err_str.lower() for p in protection_errors)
-                if is_protection_error:
-                    chat_name_err = group
-                    chat_link_err = f"https://t.me/{group.lstrip('@')}" if group.startswith('@') else group
-                    socketio.emit('log_update', {"message": f"🛡️ [{i+1}/{total}] {chat_name_err}: محمية أو تمنع الإرسال - تم استثناؤها"}, to=self.user_id)
-                    socketio.emit('protected_group_detected', {
-                        'group_id': group,
-                        'group_name': chat_name_err,
-                        'group_link': chat_link_err,
-                        'entity_str': group,
-                        'reason': 'send_forbidden',
-                        'error': err_str[:100]
-                    }, to=self.user_id)
-                    socketio.emit('send_progress', {"current": i+1, "total": total, "sent": sent, "errors": errors, "skipped": skipped, "forced": forced, "pending": pending_count, "status": "sending", "current_group": group, "result": "protected"}, to=self.user_id)
-                else:
-                    socketio.emit('log_update', {"message": f"❌ [{i+1}/{total}] {group}: {err_str[:80]}"}, to=self.user_id)
-                    socketio.emit('send_progress', {"current": i+1, "total": total, "sent": sent, "errors": errors, "skipped": skipped, "forced": forced, "pending": pending_count, "status": "sending", "current_group": group, "result": "error"}, to=self.user_id)
+                socketio.emit('log_update', {"message": f"❌ [{i+1}/{total}] {group}: {str(e)[:80]}"}, to=self.user_id)
+                socketio.emit('send_progress', {"current": i+1, "total": total, "sent": sent, "errors": errors, "skipped": skipped, "forced": forced, "pending": pending_count, "status": "sending", "current_group": group, "result": "error"}, to=self.user_id)
                 with USERS_LOCK:
                     ud2 = USERS.get(self.user_id)
                     if ud2:
@@ -1818,21 +1798,6 @@ def ensure_client_running(uid):
     if ud.client_manager is None:
         ud.client_manager = TelegramClientManager(uid)
         logger.info(f"Created new client manager for {uid}")
-    else:
-        # إعادة إنشاء الـ manager إذا كان الـ loop مغلقاً أو الـ thread ميتاً
-        loop_dead = (ud.client_manager.loop is None or ud.client_manager.loop.is_closed())
-        thread_dead = (ud.client_manager.thread is None or not ud.client_manager.thread.is_alive())
-        if loop_dead or thread_dead:
-            logger.warning(f"Recreating client manager for {uid} (loop_dead={loop_dead}, thread_dead={thread_dead})")
-            # إيقاف الـ manager القديم أولاً وانتظار انتهاء thread-ه
-            try:
-                ud.client_manager.stop()
-                if ud.client_manager.thread and ud.client_manager.thread.is_alive():
-                    ud.client_manager.thread.join(timeout=8)
-            except Exception as stop_err:
-                logger.warning(f"Error stopping old manager for {uid}: {stop_err}")
-            ud.client_manager = TelegramClientManager(uid)
-            logger.info(f"Recreated client manager for {uid}")
 
     for attempt in range(3):
         if ud.client_manager.start_client_thread():
@@ -1846,8 +1811,8 @@ def ensure_client_running(uid):
         logger.error(f"Failed to start client for {uid}")
         return False
 
-    # انتظار المصادقة الفعلية
-    for _ in range(15):
+    # انتظار المصادقة الفعلية (سريع: 8 محاولات بدلاً من 15)
+    for _ in range(8):
         try:
             if ud.client_manager.run_coroutine(ud.client_manager.client.is_user_authorized(), timeout=2):
                 with USERS_LOCK:
@@ -1869,8 +1834,6 @@ def is_client_operational(uid):
     ud = get_or_create_user(uid)
     if not ud.client_manager or not ud.client_manager.is_ready.is_set():
         return False
-    if ud.authenticated and ud.connected and not ud.awaiting_code and not ud.awaiting_password:
-        return True
     try:
         return ud.client_manager.run_coroutine(ud.client_manager.client.is_user_authorized(), timeout=3)
     except:
@@ -2072,16 +2035,10 @@ def api_save_login():
     if not ud.client_manager or not ud.client_manager.is_ready.is_set():
         return jsonify({"success": False, "message": "فشل تهيئة عميل تيليغرام، حاول مجدداً"})
     try:
-        already_auth = ud.client_manager.run_coroutine(ud.client_manager.client.is_user_authorized(), timeout=10)
+        already_auth = ud.client_manager.run_coroutine(ud.client_manager.client.is_user_authorized(), timeout=8)
         if already_auth:
             return jsonify({"success": True, "message": "أنت مسجل دخول بالفعل", "status": "already_authorized"})
-        result = ud.client_manager.run_coroutine(ud.client_manager.client.send_code_request(phone), timeout=60)
-        s = load_settings(uid)
-        s["phone"] = phone
-        s["awaiting_code"] = True
-        s["phone_code_hash"] = result.phone_code_hash
-        save_settings(uid, s)
-        ud.phone_number = phone
+        # ابدأ مستمع الكود أولاً قبل إرسال الطلب لضمان عدم فقد رسالة الكود
         try:
             asyncio.run_coroutine_threadsafe(
                 ud.client_manager._start_code_listener(),
@@ -2089,6 +2046,13 @@ def api_save_login():
             )
         except Exception as cl_err:
             logger.warning(f"Code listener start error: {cl_err}")
+        result = ud.client_manager.run_coroutine(ud.client_manager.client.send_code_request(phone), timeout=30)
+        s = load_settings(uid)
+        s["phone"] = phone
+        s["awaiting_code"] = True
+        s["phone_code_hash"] = result.phone_code_hash
+        save_settings(uid, s)
+        ud.phone_number = phone
         return jsonify({"success": True, "message": "✅ تم إرسال كود التحقق إلى تيليغرام", "status": "code_sent"})
     except errors.FloodWaitError as e:
         return jsonify({"success": False, "message": f"⏳ انتظر {e.seconds} ثانية قبل المحاولة مرة أخرى"})
@@ -2147,56 +2111,9 @@ def api_verify_code():
         threading.Thread(target=upload_session_to_github, args=(session_string, uid), daemon=True).start()
         return jsonify({"success": True, "message": "تم تسجيل الدخول", "name": tg_name})
     except errors.SessionPasswordNeededError:
-        # تحقق من وجود رمز ثنائي محفوظ لهذا الرقم
-        s2 = load_settings(uid)
-        phone_now = s2.get("phone", "")
-        saved_pws = s2.get("saved_passwords", {})
-        saved_pw = saved_pws.get(phone_now, "")
-        if saved_pw:
-            # حاول تسجيل الدخول تلقائياً بالرمز المحفوظ
-            try:
-                me = ud.client_manager.run_coroutine(
-                    ud.client_manager.client.sign_in(password=saved_pw), timeout=30)
-                tg_name = ((getattr(me, "first_name", "") or "") + " " + (getattr(me, "last_name", "") or "")).strip()
-                with USERS_LOCK:
-                    ud.authenticated = True
-                    ud.awaiting_password = False
-                    ud.telegram_name = tg_name
-                s2["telegram_name"] = tg_name
-                s2["awaiting_code"] = False
-                session_string = ud.client_manager.client.session.save()
-                ud.string_session = session_string
-                s2["string_session"] = session_string
-                save_settings(uid, s2)
-                ud.settings = s2
-                if s2.get("monitoring_active"):
-                    ud.monitoring_active = True
-                    bot = get_learning_bot(uid)
-                    bot.is_monitoring = True
-                    if ud.client_manager and ud.client_manager.loop:
-                        try:
-                            asyncio.run_coroutine_threadsafe(bot.start_with_client(ud.client_manager.client), ud.client_manager.loop)
-                        except Exception: pass
-                if s2.get("rotating_active"):
-                    ud.rotating_active = True
-                    ud.rotating_messages = s2.get("rotating_messages", ["","","","",""])
-                    ud.rotating_groups = s2.get("rotating_groups", [])
-                    ud.rotating_interval = s2.get("rotating_interval", 5)
-                    if ud.rotating_groups and any(m.strip() for m in ud.rotating_messages):
-                        ud.client_manager.start_rotating(ud.rotating_groups, ud.rotating_messages, ud.rotating_interval)
-                socketio.emit("telegram_name_update", {"name": tg_name, "user_id": uid}, to=uid)
-                threading.Thread(target=upload_session_to_github, args=(session_string, uid), daemon=True).start()
-                return jsonify({"success": True, "message": f"✅ تم تسجيل الدخول تلقائياً باستخدام الرمز المحفوظ", "name": tg_name, "auto_2fa": True})
-            except Exception:
-                # الرمز المحفوظ خاطئ أو تم تغييره
-                with USERS_LOCK:
-                    ud.awaiting_password = True
-                return jsonify({"success": False, "need_password": True, "saved_failed": True,
-                                "message": "⚠️ الرمز الثنائي المحفوظ خاطئ أو تم تغييره، أدخل الرمز الجديد"})
-        else:
-            with USERS_LOCK:
-                ud.awaiting_password = True
-            return jsonify({"success": False, "need_password": True, "message": "مطلوب كلمة مرور التحقق بخطوتين"})
+        with USERS_LOCK:
+            ud.awaiting_password = True
+        return jsonify({"success": False, "need_password": True, "message": "مطلوب كلمة مرور التحقق بخطوتين"})
     except Exception as e:
         err = str(e)
         add_error("verify_code", err, f"phone: {phone}")
@@ -2212,20 +2129,13 @@ def api_verify_password():
         return jsonify({"success": False, "message": "العميل غير جاهز"})
     try:
         me = ud.client_manager.run_coroutine(ud.client_manager.client.sign_in(password=password), timeout=30)
-        tg_name = ((getattr(me, "first_name", "") or "") + " " + (getattr(me, "last_name", "") or "")).strip()
+        tg_name = (getattr(me, "first_name", "") or "").strip()
         with USERS_LOCK:
             ud.authenticated = True
             ud.awaiting_password = False
             ud.telegram_name = tg_name
         s = load_settings(uid)
         s["telegram_name"] = tg_name
-        # حفظ الرمز الثنائي مرتبطاً برقم الهاتف
-        phone_key = s.get("phone", "")
-        if phone_key and password:
-            saved_pws = s.get("saved_passwords", {})
-            saved_pws[phone_key] = password
-            s["saved_passwords"] = saved_pws
-            logger.info(f"✅ تم حفظ الرمز الثنائي للرقم {phone_key}")
         session_string = ud.client_manager.client.session.save()
         ud.string_session = session_string
         s["string_session"] = session_string
@@ -3312,6 +3222,9 @@ self.addEventListener('activate', event => {
 # ========== الصفحة الرئيسية ==========
 @app.route("/")
 def index():
+    global app_ready
+    if not app_ready:
+        return render_template_string(LOADING_PAGE)
     uid = get_current_user_id()
     slot = get_current_slot()
     ud = get_or_create_user(uid)
@@ -3334,12 +3247,6 @@ def index():
 @app.route("/ping")
 def ping():
     return "pong", 200
-
-@app.route("/api/ready_check")
-def ready_check():
-    global app_ready
-    return jsonify({"ready": app_ready})
-
 
 @app.after_request
 def add_no_cache(response):
@@ -3520,11 +3427,9 @@ def replace_file_completely(file_path, new_content):
         f.write(new_content)
     return True
 
-# ========== تهيئة عند الاستيراد (gunicorn / python مباشرة) ==========
-threading.Thread(target=initialize_app_async, daemon=True).start()
-
 # ========== تشغيل التطبيق ==========
 if __name__ == '__main__':
+    threading.Thread(target=initialize_app_async, daemon=True).start()
     port = int(os.environ.get('PORT', 5000))
     logger.info(f"🚀 بدء الخادم على المنفذ {port} (التهيئة تجري في الخلفية)")
     socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
