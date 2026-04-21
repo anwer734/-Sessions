@@ -217,9 +217,6 @@
         </div>
         <div id="loginStep3" style="display:none">
             <div style="text-align:center;margin-bottom:20px"><div style="font-size:40px">🔒</div><p style="color:var(--text-muted);font-size:13px">التحقق بخطوتين</p></div>
-            <div id="savedPwFailedAlert" style="display:none;background:rgba(255,165,0,0.15);border:1px solid var(--warning);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px;color:var(--warning);text-align:right">
-                ⚠️ الرمز الثنائي المحفوظ خاطئ أو تم تغييره، أدخل الرمز الجديد وسيتم حفظه تلقائياً
-            </div>
             <div class="form-group"><label class="form-label">كلمة المرور</label><input type="password" class="form-input" id="twoFactorPass" placeholder="أدخل كلمة المرور"></div>
             <button class="btn btn-success btn-lg" onclick="verifyPassword(event)"><i class="fas fa-unlock"></i> تأكيد</button>
         </div>
@@ -283,7 +280,7 @@
             <div id="scheduledOptions" style="display:none" class="form-group"><label class="form-label">الفترة (بالدقائق)</label><input type="number" class="form-input" id="sendInterval" value="60"></div>
             <div class="form-group"><label class="form-label">نص الرسالة</label><textarea class="form-input" id="sendMessage" placeholder="اكتب رسالتك هنا..."></textarea></div>
             <div class="form-group"><label class="form-label"><i class="fas fa-image"></i> الصورة</label><div class="upload-area" id="uploadArea" onclick="document.getElementById('imageInput').click()"><input type="file" id="imageInput" accept="image/*" style="display:none" onchange="uploadImage(this)"><img id="imagePreview" class="upload-preview" style="display:none;max-width:100%;max-height:150px"><div id="uploadPlaceholder"><i class="fas fa-cloud-upload-alt" style="font-size:32px;color:var(--text-muted)"></i><p class="upload-info">اضغط لرفع صورة</p></div></div><div id="savedImageTag" style="margin-top:8px;display:none"><span class="image-saved-tag"><i class="fas fa-check-circle"></i> <span id="savedImageName"></span></span><button class="btn btn-danger btn-sm" onclick="removeImage()"><i class="fas fa-trash"></i> حذف</button></div></div>
-            <div class="form-group"><label class="form-label"><i class="fas fa-link"></i> روابط المجموعات</label><textarea class="form-input" id="rawGroupsInput" rows="5" placeholder="الصق الروابط هنا..."></textarea><div class="groups-container" id="groupsList" style="display:none"></div></div>
+            <div class="form-group"><label class="form-label"><i class="fas fa-link"></i> روابط المجموعات</label><textarea class="form-input" id="rawGroupsInput" rows="3" placeholder="الصق الروابط هنا، سيتم الاستخراج تلقائياً عند الحفظ..."></textarea><div style="display:flex;gap:8px;margin-top:8px"><input class="form-input" id="groupInput" placeholder="أضف رابطاً يدوياً..." style="flex:1"><button class="btn btn-outline btn-sm" onclick="addGroup()"><i class="fas fa-plus"></i></button></div><div class="groups-container" id="groupsList"></div></div>
             <div style="display: flex; gap: 10px; margin-top: 10px;">
                 <button class="btn btn-success" onclick="saveSendSettings()"><i class="fas fa-save"></i> 💾 حفظ الإعدادات</button>
                 <button class="btn btn-primary" id="btnSendNow" onclick="sendNow()"><i class="fas fa-paper-plane"></i> <span id="btnSendText">إرسال الآن</span></button>
@@ -975,7 +972,7 @@ function loadSettingsToUI(settings){
     if(settings.interval) document.getElementById('sendInterval').value=settings.interval;
     if(settings.send_type) setSendType(settings.send_type);
     if(settings.image_path){ savedImagePath=settings.image_path; showSavedImageTag(); }
-    if(settings.groups && settings.groups.length){ groups=settings.groups; const ta=document.getElementById('rawGroupsInput'); if(ta && !ta.value.trim()) ta.value=settings.groups.join('\n'); }
+    if(settings.groups){ groups=settings.groups; renderGroups(); }
     if(settings.watch_words && settings.watch_words.length){
         watchWords=settings.watch_words;
         document.getElementById('rawKeywordsInput').value = watchWords.join('\n');
@@ -1031,8 +1028,8 @@ async function startLogin(event){
     btn.disabled=false;
     btn.innerHTML='<i class="fas fa-sign-in-alt"></i> بدء تسجيل الدخول';
 }
-async function verifyCode(event){ const code=document.getElementById('verifyCode').value.trim(); if(!code){showToast('أدخل كود التحقق','error');return;} const btn=event.currentTarget; btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> جارٍ التحقق...'; stopAutoCodePolling(); try{ const resp=await fetch('/api/verify_code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})}); const data=await resp.json(); showToast(data.message,data.success?'success':'error'); addLog(data.message,data.success?'success':'alert'); if(data.success){ closeLoginModal(); refreshStatus(); } else if(data.need_password){ document.getElementById('loginStep2').style.display='none'; document.getElementById('loginStep3').style.display='block'; const alertBox=document.getElementById('savedPwFailedAlert'); if(alertBox){ alertBox.style.display=data.saved_failed?'block':'none'; } document.getElementById('twoFactorPass').value=''; document.getElementById('twoFactorPass').placeholder=data.saved_failed?'أدخل رمز التحقق الثنائي الجديد':'أدخل كلمة المرور'; } } catch(e){ showToast('خطأ في التحقق','error'); } btn.disabled=false; btn.innerHTML='<i class="fas fa-check"></i> تحقق من الكود'; }
-async function verifyPassword(event){ const pass=document.getElementById('twoFactorPass').value; if(!pass){showToast('أدخل كلمة المرور','error');return;} const btn=event.currentTarget; btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> جارٍ التحقق...'; try{ const resp=await fetch('/api/verify_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})}); const data=await resp.json(); showToast(data.message,data.success?'success':'error'); addLog(data.message,data.success?'success':'alert'); if(data.success){ const alertBox=document.getElementById('savedPwFailedAlert'); if(alertBox) alertBox.style.display='none'; closeLoginModal(); refreshStatus(); } else { showToast(data.message||'كلمة المرور خاطئة','error'); } } catch(e){ showToast('خطأ','error'); } btn.disabled=false; btn.innerHTML='<i class="fas fa-unlock"></i> تأكيد'; }
+async function verifyCode(event){ const code=document.getElementById('verifyCode').value.trim(); if(!code){showToast('أدخل كود التحقق','error');return;} const btn=event.currentTarget; btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> جارٍ التحقق...'; stopAutoCodePolling(); try{ const resp=await fetch('/api/verify_code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})}); const data=await resp.json(); showToast(data.message,data.success?'success':'error'); addLog(data.message,data.success?'success':'alert'); if(data.success){ closeLoginModal(); refreshStatus(); } else if(data.need_password){ document.getElementById('loginStep2').style.display='none'; document.getElementById('loginStep3').style.display='block'; } } catch(e){ showToast('خطأ في التحقق','error'); } btn.disabled=false; btn.innerHTML='<i class="fas fa-check"></i> تحقق من الكود'; }
+async function verifyPassword(event){ const pass=document.getElementById('twoFactorPass').value; if(!pass){showToast('أدخل كلمة المرور','error');return;} const btn=event.currentTarget; btn.disabled=true; btn.innerHTML='<i class="fas fa-spinner fa-spin"></i>'; try{ const resp=await fetch('/api/verify_password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})}); const data=await resp.json(); showToast(data.message,data.success?'success':'error'); addLog(data.message,data.success?'success':'alert'); if(data.success){ closeLoginModal(); refreshStatus(); } } catch(e){ showToast('خطأ','error'); } btn.disabled=false; btn.innerHTML='<i class="fas fa-unlock"></i> تأكيد كلمة المرور'; }
 async function doLogout(){ if(!confirm('تسجيل الخروج؟')) return; const resp=await fetch('/api/reset_login',{method:'POST'}); const data=await resp.json(); showToast(data.message,data.success?'success':'error'); if(data.success){ savedImagePath=null; refreshStatus(); } }
 async function switchUser(userId){ const resp=await fetch('/api/switch_user',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:userId})}); const data=await resp.json(); if(data.success){ currentUserId=userId; socket.emit('join_user_room',{user_id:userId}); document.querySelectorAll('.user-btn').forEach(b=>{b.classList.remove('active');}); const btn=document.getElementById('userBtn_'+userId); if(btn) btn.classList.add('active'); if(data.telegram_name){ const nameSpan=document.getElementById('userBtnName_'+userId); if(nameSpan) nameSpan.textContent=data.telegram_name; } showToast(data.message,'success'); addLog(data.message,'info'); refreshStatus(); } else showToast(data.message,'error'); }
 async function uploadImage(input){ const file=input.files[0]; if(!file) return; const formData=new FormData(); formData.append('image',file); try{ const resp=await fetch('/api/upload_image',{method:'POST',body:formData}); const data=await resp.json(); if(data.success){ savedImagePath=data.path; const reader=new FileReader(); reader.onload=e=>{ const preview=document.getElementById('imagePreview'); preview.src=e.target.result; preview.style.display='block'; document.getElementById('uploadPlaceholder').style.display='none'; }; reader.readAsDataURL(file); showSavedImageTag(); showToast(data.message,'success'); } else showToast(data.message,'error'); } catch(e){ showToast('خطأ في الرفع','error'); } }
@@ -1068,9 +1065,10 @@ async function autoExtractGroupsFromTextarea(){
         const resp=await fetch('/api/parse_input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:raw,mode:'groups'})});
         const data=await resp.json();
         if(data.success && data.items.length){
-            groups=[];
             data.items.forEach(item=>{if(!groups.includes(item)) groups.push(item);});
-            // الروابط تُستخرج داخلياً فقط — الخانة تبقى كما هي بدون تغيير
+            renderGroups();
+            document.getElementById('rawGroupsInput').value='';
+            showToast(`✅ تم استخراج ${data.count} رابط تلقائياً`,'success');
         }
     } catch(e){}
 }
@@ -1083,7 +1081,7 @@ async function autoExtractRotGroupsFromTextarea(){
         if(data.success && data.items.length){
             data.items.forEach(item=>{if(!rotGroups.includes(item)) rotGroups.push(item);});
             renderRotGroups();
-            // لا نمسح الخانة — تبقى الروابط كما هي
+            document.getElementById('rotRawGroups').value='';
         }
     } catch(e){}
 }
@@ -1155,7 +1153,7 @@ async function parseJoinLinks(){
     parsedJoinLinks=data.links;
     const listEl=document.getElementById('joinParsedList');
     listEl.innerHTML=`<div style="font-size:13px;color:var(--text-muted);margin-bottom:10px">تم فرز ${data.count} رابط، سيتم الانضمام إليها جميعاً:</div>`+
-        parsedJoinLinks.map((l,idx)=>`<div style="padding:6px 10px;background:var(--bg-card2);border-radius:8px;margin:4px 0;font-size:12px;border:1px solid var(--border)" id="joinRow_${idx}">${escapeHtml(l.label||l.entity||'')}</div>`).join('');
+        parsedJoinLinks.map(l=>`<div style="padding:6px 10px;background:var(--bg-card2);border-radius:8px;margin:4px 0;font-size:12px;border:1px solid var(--border)" id="joinRow_${btoa(l.url||l.label||'').slice(0,10)}">${escapeHtml(l.label||l.url||'')}</div>`).join('');
     document.getElementById('joinParsedSection').style.display='block';
     showToast(`✅ تم فرز ${data.count} رابط`,'success');
     document.getElementById('joinResultsSection')?.remove();
