@@ -77,6 +77,8 @@ errors_list = []
 errors_lock = Lock()
 
 # ========== دوال GitHub ==========
+_SESSION_SHA_CACHE = {}
+
 def upload_session_to_github(session_string, user_id):
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return False
@@ -86,21 +88,28 @@ def upload_session_to_github(session_string, user_id):
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_name}"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
         for attempt in range(3):
-            sha = None
-            try:
-                resp = requests.get(url, headers=headers, timeout=10)
-                if resp.status_code == 200:
-                    sha = resp.json().get("sha")
-            except:
-                pass
+            sha = _SESSION_SHA_CACHE.get(user_id)
+            if not sha:
+                try:
+                    resp = requests.get(url, headers=headers, timeout=10)
+                    if resp.status_code == 200:
+                        sha = resp.json().get("sha")
+                        if sha:
+                            _SESSION_SHA_CACHE[user_id] = sha
+                except:
+                    pass
             data = {"message": f"Update session for {user_id}", "content": content_base64, "branch": GITHUB_BRANCH}
             if sha:
                 data["sha"] = sha
             resp = requests.put(url, headers=headers, json=data, timeout=15)
             if resp.status_code in [200, 201]:
+                new_sha = resp.json().get("content", {}).get("sha")
+                if new_sha:
+                    _SESSION_SHA_CACHE[user_id] = new_sha
                 logger.info(f"✅ Session for {user_id} uploaded to GitHub")
                 return True
             elif resp.status_code == 409:
+                _SESSION_SHA_CACHE.pop(user_id, None)
                 time.sleep(1 + attempt)
                 continue
             else:
@@ -155,18 +164,20 @@ def delete_session_from_github(user_id):
 def backup_all_sessions_to_github():
     with USERS_LOCK:
         uids = list(USERS.keys())
-    success_count = 0
-    for uid in uids:
+
+    def backup_one(uid):
         ud = get_or_create_user(uid)
-        if ud.string_session:
-            if upload_session_to_github(ud.string_session, uid):
-                success_count += 1
-        else:
+        session_string = ud.string_session
+        if not session_string:
             settings = load_settings(uid)
-            if settings.get("string_session"):
-                if upload_session_to_github(settings["string_session"], uid):
-                    success_count += 1
-    return success_count
+            session_string = settings.get("string_session")
+        if session_string:
+            return upload_session_to_github(session_string, uid)
+        return False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(backup_one, uids))
+    return sum(1 for r in results if r)
 
 def restore_all_sessions_from_github():
     if not GITHUB_TOKEN or not GITHUB_REPO:
@@ -176,35 +187,42 @@ def restore_all_sessions_from_github():
         url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/"
         headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
         resp = requests.get(url, headers=headers, timeout=15)
-        if resp.status_code == 200:
-            files = resp.json()
-            restored = 0
-            for file_info in files:
-                file_name = file_info.get("name", "")
-                if file_name.startswith("session_") and file_name.endswith(".txt"):
-                    user_id = file_name.replace("session_", "").replace(".txt", "")
-                    content_base64 = file_info.get("content", "")
-                    if not content_base64:
-                        download_url = file_info.get("download_url")
-                        if download_url:
-                            content_resp = requests.get(download_url)
-                            if content_resp.status_code == 200:
-                                session_string = content_resp.text
-                            else:
-                                continue
-                        else:
-                            continue
-                    else:
-                        session_string = base64.b64decode(content_base64).decode('utf-8')
-                    settings = load_settings(user_id)
-                    settings["string_session"] = session_string
-                    save_settings(user_id, settings)
-                    ud = get_or_create_user(user_id)
-                    ud.string_session = session_string
-                    restored += 1
-                    logger.info(f"Restored session for {user_id} from GitHub")
-            return restored
-        return 0
+        if resp.status_code != 200:
+            return 0
+        files = resp.json()
+        session_files = [f for f in files if f.get("name", "").startswith("session_") and f.get("name", "").endswith(".txt")]
+
+        def restore_one(file_info):
+            file_name = file_info.get("name", "")
+            user_id = file_name.replace("session_", "").replace(".txt", "")
+            sha = file_info.get("sha")
+            if sha:
+                _SESSION_SHA_CACHE[user_id] = sha
+            content_base64 = file_info.get("content", "")
+            if not content_base64:
+                download_url = file_info.get("download_url")
+                if not download_url:
+                    return False
+                try:
+                    content_resp = requests.get(download_url, timeout=10)
+                    if content_resp.status_code != 200:
+                        return False
+                    session_string = content_resp.text.strip()
+                except:
+                    return False
+            else:
+                session_string = base64.b64decode(content_base64.replace("\n", "")).decode('utf-8')
+            settings = load_settings(user_id)
+            settings["string_session"] = session_string
+            save_settings(user_id, settings)
+            ud = get_or_create_user(user_id)
+            ud.string_session = session_string
+            logger.info(f"Restored session for {user_id} from GitHub")
+            return True
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(restore_one, session_files))
+        return sum(1 for r in results if r)
     except Exception as e:
         add_error("github_restore_all", str(e), "")
         return 0
@@ -1851,6 +1869,8 @@ def is_client_operational(uid):
     ud = get_or_create_user(uid)
     if not ud.client_manager or not ud.client_manager.is_ready.is_set():
         return False
+    if ud.authenticated and ud.connected and not ud.awaiting_code and not ud.awaiting_password:
+        return True
     try:
         return ud.client_manager.run_coroutine(ud.client_manager.client.is_user_authorized(), timeout=3)
     except:
